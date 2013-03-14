@@ -59,11 +59,51 @@ private Dictionary<int, Type> fBoolDict = null;
 private Dictionary<int, Type> fListStrDict = null;
 private Dictionary<String,PerModeSettings> fPerMode = null;
 
+private DateTime fLastPingTime = DateTime.Now;
+private Object fPingLock = new Object();
+private Thread fP1 = null;
+private Thread fP2 = null;
+
 /* Settings */
 
 private int DebugLevel;
 private bool QuietMode;
 private String ShowInLog; // command line to show info in plugin.log
+
+void pingLoop() {
+    ConsoleWrite("pingLoop starting");
+    while (fIsEnabled) {
+        ServerCommand("version");
+        Thread.Sleep(5*1000);
+    }
+    ConsoleWrite("pingLoop exiting");
+}
+
+void pingCheck() {
+    ConsoleWrite("pingCheck starting");
+    int maxBlast = 12;
+    while (fIsEnabled) {
+        DateTime check = DateTime.Now;
+        Thread.Sleep(2500);
+        lock (fPingLock) {
+            check = fLastPingTime;
+        }
+        double n = DateTime.Now.Subtract(check).TotalSeconds;
+        if (n > 10.0) {
+            if (maxBlast > 0) {
+                ConsoleWarn("^b^8 +-+-+-+-+-+-+ CHECK FOR LOCK-UP! +-+-+-+-+-+-+^0 " + n.ToString("F1") + " secs");
+                maxBlast = maxBlast - 1;
+                lock (fPingLock) {
+                    fLastPingTime = DateTime.Now;
+                }
+            } else break;
+        } else if (fSI != null) {
+            DebugWrite("^9 ..... " + fSI.PlayerCount + " players  on " + fSI.Map + " for " + TimeSpan.FromSeconds(fSI.RoundTime).ToString(), 1);
+            maxBlast = 12;
+        }
+    }
+    ConsoleWrite("pingCheck exiting");
+}
 
 /* Constructor */
 
@@ -92,6 +132,8 @@ public YetAnotherBalancer() {
     fListStrDict.Add(1, typeof(List<string>));
     
     fPerMode = new Dictionary<String,PerModeSettings>();
+    
+    fLastPingTime = DateTime.Now;
     
     /* Settings */
     
@@ -170,7 +212,7 @@ public String GetPluginName() {
 }
 
 public String GetPluginVersion() {
-    return "0.0.0.1";
+    return "0.0.0.5";
 }
 
 public String GetPluginAuthor() {
@@ -367,7 +409,7 @@ public void SetPluginVariable(String strVariable, String strValue) {
             } else if (fListStrDict.ContainsValue(fieldType)) {
                 field.SetValue(this, new List<string>(CPluginVariable.DecodeStringArray(strValue)));
             } else if (fBoolDict.ContainsValue(fieldType)) {
-                ConsoleWrite(propertyName + " strValue = " + strValue);
+                DebugWrite(propertyName + " strValue = " + strValue, 3);
                 if (Regex.Match(strValue, "True", RegexOptions.IgnoreCase).Success) {
                     field.SetValue(this, true);
                 } else {
@@ -454,9 +496,9 @@ public void SetPluginVariable(String strVariable, String strValue) {
         if (!String.IsNullOrEmpty(ShowInLog)) {
             if (Regex.Match(ShowInLog, @"modes", RegexOptions.IgnoreCase).Success) {
                 List<String> modeList = GetSimplifiedModes();
-                ConsoleWrite("modes(" + modeList.Count + "):");
+                DebugWrite("modes(" + modeList.Count + "):", 2);
                 foreach (String m in modeList) {
-                    ConsoleWrite(m);
+                    DebugWrite(m, 2);
                 }
             }
             
@@ -551,18 +593,52 @@ public void OnPluginLoaded(String strHostName, String strPort, String strPRoConV
 public void OnPluginEnable() {
     fIsEnabled = true;
     ConsoleWrite("Enabled! Version = " + GetPluginVersion());
+    
+    Thread fP1 = new Thread(new ThreadStart(pingLoop));
+    fP1.IsBackground = true;
+    fP1.Name = "pingLoop";
+    Thread fP2 = new Thread(new ThreadStart(pingCheck));
+    fP2.IsBackground = true;
+    fP2.Name = "pingCheck";
+    
+    fP1.Start();
+    fP2.Start();
 }
+
+
+private void JoinWith(Thread thread, int secs)
+{
+    if (thread == null || !thread.IsAlive)
+        return;
+
+    ConsoleWrite("Waiting for ^b" + thread.Name + "^n to finish");
+    thread.Join(secs*1000);
+}
+
 
 public void OnPluginDisable() {
     fIsEnabled = false;
+    
+    JoinWith(fP1, 6);
+    JoinWith(fP2, 6);
+
     ConsoleWrite("Disabled!");
 }
 
 
-public override void OnVersion(String serverType, String version) { }
+public override void OnVersion(String type, String ver) {
+    lock (fPingLock) {
+        fLastPingTime = DateTime.Now;
+    }
+    DebugWrite("OnVersion " + type + " " + ver, 9);
+}
+
+private CServerInfo fSI = null;
 
 public override void OnServerInfo(CServerInfo serverInfo) {
     DebugWrite("Debug level = " + DebugLevel, 9);
+    
+    fSI = serverInfo;
 }
 
 public override void OnResponseError(List<String> requestWords, String error) { }
