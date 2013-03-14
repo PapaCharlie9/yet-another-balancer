@@ -52,6 +52,16 @@ public class YetAnotherBalancer : PRoConPluginAPI, IPRoConPluginInterface
         public int GoAggressive = 0;
     }
 
+    public class Sample {
+        public Sample(DateTime when, double tickets) {
+            this.When = when;
+            this.Tickets = tickets;
+        }
+        
+        public DateTime When;
+        public double Tickets;
+    }
+    
 private bool fIsEnabled;
 private Dictionary<String,String> fModeToSimple = null;
 private Dictionary<int, Type> fEasyTypeDict = null;
@@ -63,6 +73,10 @@ private DateTime fLastPingTime = DateTime.Now;
 private Object fPingLock = new Object();
 private Thread fP1 = null;
 private Thread fP2 = null;
+private Queue<Sample> f1Samples = null;
+private Queue<Sample> f2Samples = null;
+private Queue<Sample> fQ1Samples = null;
+private Queue<Sample> fQ2Samples = null;
 
 /* Settings */
 
@@ -73,7 +87,7 @@ private String ShowInLog; // command line to show info in plugin.log
 void pingLoop() {
     ConsoleWrite("pingLoop starting");
     while (fIsEnabled) {
-        ServerCommand("version");
+        ServerCommand("serverInfo");
         Thread.Sleep(5*1000);
     }
     ConsoleWrite("pingLoop exiting");
@@ -134,6 +148,11 @@ public YetAnotherBalancer() {
     fPerMode = new Dictionary<String,PerModeSettings>();
     
     fLastPingTime = DateTime.Now;
+    
+    f1Samples = new Queue<Sample>();
+    f2Samples = new Queue<Sample>();
+    fQ1Samples = new Queue<Sample>();
+    fQ2Samples = new Queue<Sample>();
     
     /* Settings */
     
@@ -208,11 +227,11 @@ public void ServerCommand(params String[] args)
 
 
 public String GetPluginName() {
-    return "Yet Another Balancer";
+    return "TEST";
 }
 
 public String GetPluginVersion() {
-    return "0.0.0.5";
+    return "0.0.0.7";
 }
 
 public String GetPluginAuthor() {
@@ -383,7 +402,7 @@ public List<CPluginVariable> GetPluginVariables() {
 
 public void SetPluginVariable(String strVariable, String strValue) {
 
-    DebugWrite(strVariable + " <- " + strValue, 3);
+    DebugWrite(strVariable + " <- " + strValue, 4);
 
     try {
         String tmp = strVariable;
@@ -409,7 +428,7 @@ public void SetPluginVariable(String strVariable, String strValue) {
             } else if (fListStrDict.ContainsValue(fieldType)) {
                 field.SetValue(this, new List<string>(CPluginVariable.DecodeStringArray(strValue)));
             } else if (fBoolDict.ContainsValue(fieldType)) {
-                DebugWrite(propertyName + " strValue = " + strValue, 3);
+                DebugWrite(propertyName + " strValue = " + strValue, 4);
                 if (Regex.Match(strValue, "True", RegexOptions.IgnoreCase).Success) {
                     field.SetValue(this, true);
                 } else {
@@ -444,7 +463,7 @@ public void SetPluginVariable(String strVariable, String strValue) {
                         }
                     }
                 } else {
-                    DebugWrite("field is null", 3);
+                    DebugWrite("field is null", 4);
                 }
                 /*
                 switch (perModeName) {
@@ -496,9 +515,9 @@ public void SetPluginVariable(String strVariable, String strValue) {
         if (!String.IsNullOrEmpty(ShowInLog)) {
             if (Regex.Match(ShowInLog, @"modes", RegexOptions.IgnoreCase).Success) {
                 List<String> modeList = GetSimplifiedModes();
-                DebugWrite("modes(" + modeList.Count + "):", 2);
+                DebugWrite("modes(" + modeList.Count + "):", 4);
                 foreach (String m in modeList) {
-                    DebugWrite(m, 2);
+                    DebugWrite(m, 4);
                 }
             }
             
@@ -597,12 +616,16 @@ public void OnPluginEnable() {
     Thread fP1 = new Thread(new ThreadStart(pingLoop));
     fP1.IsBackground = true;
     fP1.Name = "pingLoop";
+    /*
     Thread fP2 = new Thread(new ThreadStart(pingCheck));
     fP2.IsBackground = true;
     fP2.Name = "pingCheck";
+    */
     
     fP1.Start();
+    /*
     fP2.Start();
+    */
 }
 
 
@@ -620,7 +643,9 @@ public void OnPluginDisable() {
     fIsEnabled = false;
     
     JoinWith(fP1, 6);
+    /*
     JoinWith(fP2, 6);
+    */
 
     ConsoleWrite("Disabled!");
 }
@@ -635,10 +660,69 @@ public override void OnVersion(String type, String ver) {
 
 private CServerInfo fSI = null;
 
+private bool fListenForSpawn = true;
+
+private int fNumSwitches = -1;
+
 public override void OnServerInfo(CServerInfo serverInfo) {
     DebugWrite("Debug level = " + DebugLevel, 9);
+    DateTime now = DateTime.Now;
+    
+    //if (!Regex.Match(serverInfo.GameMode, "Rush").Success) return;
     
     fSI = serverInfo;
+    
+    List<TeamScore> ts = fSI.TeamScores;
+    double atts = 0;
+    double defs = 0;
+    
+    foreach (TeamScore t in ts) {
+        if (t.TeamID == 1) atts = t.Score;
+        if (t.TeamID == 2) defs = t.Score;
+    }
+    
+    //DebugWrite("Tickets " + atts.ToString("F0") + "/" + defs.ToString("F0") + ", Time " + TimeSpan.FromSeconds(fSI.RoundTime).ToString().Substring(0,8), 4);
+    
+    f1Samples.Enqueue(new Sample(now, atts));
+    f2Samples.Enqueue(new Sample(now, defs));
+    fQ1Samples.Enqueue(new Sample(now, atts));
+    fQ2Samples.Enqueue(new Sample(now, defs));
+    
+    TrimQueueToTime(f1Samples, 60.0);
+    TrimQueueToTime(f2Samples, 60.0);
+    TrimQueueToTime(fQ1Samples, 20.0);
+    TrimQueueToTime(fQ2Samples, 20.0);
+    
+    // One minute means
+    
+    List<Sample> s1 = new List<Sample>(f1Samples.ToArray());
+    double mean1 = ComputeMean(s1) * 60.0;
+    double med1 = ComputeMedian(s1) * 60.0;
+    
+    List<Sample> s2 = new List<Sample>(f2Samples.ToArray());
+    double mean2 = ComputeMean(s2) * 60.0;
+    double med2 = ComputeMedian(s2) * 60.0;
+    
+    // 20 second means
+    
+    List<Sample> q1 = new List<Sample>(fQ1Samples.ToArray());
+    double qMean1 = ComputeMean(q1) * 20.0;
+    double qMed1 = ComputeMedian(q1) * 20.0;
+    
+    List<Sample> q2 = new List<Sample>(fQ2Samples.ToArray());
+    double qMean2 = ComputeMean(q2) * 20.0;
+    double qMed2 = ComputeMedian(q2) * 20.0;
+    
+    double timeWin = SumTimes(s1);
+    
+    if (DebugLevel >= 4) {
+        String line = DumpSamples(s1);
+        DebugWrite("Team 1: " + line, 4);
+        line = DumpSamples(s2);
+        DebugWrite("Team 2: " + line, 4);
+    }
+    
+    DebugWrite("Tickets ^b" + atts.ToString("F0") + "/" + defs.ToString("F0") + "^n, Time " + TimeSpan.FromSeconds(fSI.RoundTime).ToString().Substring(0,8) + ", Window: ^1" + timeWin.ToString("F1") + "^0, Ticket loss per minute: ^b" + med1.ToString("F1") + "^n(" + mean1.ToString("F1") + ")/^b" + med2.ToString("F1") + "^n(" + mean2.ToString("F2") + "), 20-second rate: ^b" + qMed1.ToString("F1") + "^n(" + qMean1.ToString("F1") + ")/^b" + qMed2.ToString("F1") + "^n(" + qMean2.ToString("F1") + ")", 3);
 }
 
 public override void OnResponseError(List<String> requestWords, String error) { }
@@ -654,9 +738,17 @@ public override void OnPlayerLeft(CPlayerInfo playerInfo) {
 
 public override void OnPlayerKilled(Kill kKillerVictimDetails) { }
 
-public override void OnPlayerSpawned(String soldierName, Inventory spawnedInventory) { }
+public override void OnPlayerSpawned(String soldierName, Inventory spawnedInventory) {
+    if (fListenForSpawn) {
+        DebugWrite("OnPlayerSpawned first spawn, count of team switches = " + fNumSwitches, 4);
+        fListenForSpawn = false;
+        fNumSwitches = -1;
+    }
+}
 
-public override void OnPlayerTeamChange(String soldierName, int teamId, int squadId) { }
+public override void OnPlayerTeamChange(String soldierName, int teamId, int squadId) {
+    if (fNumSwitches >= 0) ++fNumSwitches;
+}
 
 public override void OnGlobalChat(String speaker, String message) { }
 
@@ -664,17 +756,48 @@ public override void OnTeamChat(String speaker, String message, int teamId) { }
 
 public override void OnSquadChat(String speaker, String message, int teamId, int squadId) { }
 
-public override void OnRoundOverPlayers(List<CPlayerInfo> players) { }
+public override void OnRoundOverPlayers(List<CPlayerInfo> players) {
+    DebugWrite("OnRoundOverPlayers: number of players = " + players.Count, 1);
+}
 
-public override void OnRoundOverTeamScores(List<TeamScore> teamScores) { }
+public override void OnRoundOverTeamScores(List<TeamScore> teamScores) {
+    List<TeamScore> ts = teamScores;
+    double atts = 0;
+    double defs = 0;
+    
+    foreach (TeamScore t in ts) {
+        if (t.TeamID == 1) atts = t.Score;
+        if (t.TeamID == 2) defs = t.Score;
+    }
+    
+    DebugWrite("OnRoundOverTeamScores: Tickets " + atts.ToString("F0") + "/" + defs.ToString("F0") + ", Time " + TimeSpan.FromSeconds(fSI.RoundTime).ToString().Substring(0,8), 1);
+}
 
-public override void OnRoundOver(int winningTeamId) { }
+public override void OnRoundOver(int winningTeamId) {
+    DebugWrite("OnRoundOver: winner id = " + winningTeamId, 1);
+}
 
 public override void OnLoadingLevel(String mapFileName, int roundsPlayed, int roundsTotal) { }
 
-public override void OnLevelStarted() { }
+public override void OnLevelStarted() {
+    DebugWrite("OnLevelStarted", 1);
+}
 
-public override void OnLevelLoaded(String mapFileName, String Gamemode, int roundsPlayed, int roundsTotal) { } // BF3
+public override void OnLevelLoaded(String mapFileName, String Gamemode, int roundsPlayed, int roundsTotal) {
+    fListenForSpawn = true;
+    fNumSwitches = 0;
+    
+    Dictionary<String,String> friendlyMaps = new Dictionary<String,String>();
+    Dictionary<String,String> friendlyModes = new Dictionary<String,String>();
+    List<CMap> bf3_defs = this.GetMapDefines();
+    foreach (CMap m in bf3_defs) {
+        if (!friendlyMaps.ContainsKey(m.FileName)) friendlyMaps[m.FileName] = m.PublicLevelName;
+        if (!friendlyModes.ContainsKey(m.PlayList)) friendlyModes[m.PlayList] = m.GameMode;
+    }
+
+    DebugWrite("OnLevelLoaded " + friendlyMaps[mapFileName] + " on " + friendlyModes[Gamemode] + 
+    " round " + (roundsPlayed+1) + " of " + roundsTotal, 1);
+} // BF3
 
 
 /* ===== */
@@ -714,6 +837,84 @@ public List<String> GetSimplifiedModes() {
     if (last) r.Add("Squad Rush"); // make sure this is last
 
     return r;
+}
+
+private double ComputeMedian(List<Sample> ls) {
+    Sample tmp = null;
+    List<double> rates = new List<double>(); // tickets lost per second
+    
+    if (ls.Count == 0) return 0;
+
+    foreach (Sample s in ls) {
+        if (tmp == null) {
+            tmp = s;
+            continue;
+        }
+        double secs = s.When.Subtract(tmp.When).TotalSeconds;
+        rates.Add(Math.Abs(tmp.Tickets - s.Tickets)/secs);
+        tmp = s;
+    }
+    rates.Sort();
+    return rates[(rates.Count/2)];
+}
+
+private double ComputeMean(List<Sample> ls) {
+    Sample tmp = null;
+    double rate = 0; // tickets lost per interval
+    double secs = 0;
+
+    foreach (Sample s in ls) {
+        if (tmp == null) {
+            tmp = s;
+            continue;
+        }
+        secs = secs + s.When.Subtract(tmp.When).TotalSeconds;
+        rate = rate + Math.Abs(tmp.Tickets - s.Tickets);
+        tmp = s;
+    }
+    
+    if (secs == 0) return 0;
+    
+    return (rate/secs);
+}
+
+private double SumTimes(List<Sample> ls) {
+    Sample tmp = null;
+    double t = 0;
+
+    foreach (Sample s in ls) {
+        if (tmp == null) {
+            tmp = s;
+            continue;
+        }
+        t = t + s.When.Subtract(tmp.When).TotalSeconds;
+        tmp = s;
+    }
+    return t;
+}
+
+private String DumpSamples(List<Sample> ls) {
+    String line = null;
+    Sample tmp = null;
+    foreach (Sample s in ls) {
+        if (tmp == null) {
+            tmp = s;
+            continue;
+        }
+        if (line == null) {
+            line = "[^b" + Math.Abs(tmp.Tickets-s.Tickets).ToString("F0")  + "^n/" + s.When.Subtract(tmp.When).TotalSeconds.ToString("F0");
+        } else {
+            line = line + ",^b" + Math.Abs(tmp.Tickets-s.Tickets).ToString("F0")  + "^n/" + s.When.Subtract(tmp.When).TotalSeconds.ToString("F0");
+        }
+        tmp = s;
+    }
+    return line + "]";
+}
+
+private void TrimQueueToTime(Queue<Sample> q, double secs) {
+    while (SumTimes(new List<Sample>(q.ToArray())) > (secs+5)) {
+        Sample tmp = q.Dequeue();
+    }
 }
 
 
